@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: nigerian-virtual-community
+    name: nvc-backend
     env: node
     plan: free
     region: frankfurt
