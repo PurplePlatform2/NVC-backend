@@ -3,13 +3,10 @@ services:
     name: nvc-backend
     env: node
     plan: free
-    region: frankfurt
+    region: frankfurt        # One of the two free-supported regions
     buildCommand: "npm install"
     startCommand: "node index.js"
     autoDeploy: true
 
     envVars:
       NODE_ENV: production
-
-    # Render automatically assigns PORT, your app must use process.env.PORT
-    # Example: app.listen(process.env.PORT || 10000)
