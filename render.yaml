@@ -5,7 +5,7 @@ services:
     plan: free
     region: frankfurt        # One of the two free-supported regions
     buildCommand: "npm install"
-    startCommand: "node index.js"
+    startCommand: "node app.js"
     autoDeploy: true
 
     envVars:
