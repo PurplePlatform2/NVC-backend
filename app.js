@@ -20,10 +20,9 @@ let users = [];
      email: "test@example.com",
      password: "hashed password",
      account_type: "individual" | "organization",
-     NIN: "1234567890",
+     NIN: "1234567890",   // for individual
+     CAC: "1234567",      // for organization
      phone: "+2348109995009",
-     father_name: "John Senior",
-     mother_name: "Jane Doe",
      token: "device-bound-token",
      token_expiry: timestamp,
      device_id: "fingerprint-string",
@@ -53,15 +52,29 @@ function createDeviceBoundToken(user_id, device_id) {
 // SIGNUP
 // ------------------------------------------------------------
 app.post("/signup", async (req, res) => {
-  const { username, email, password, account_type, device_id, NIN, father_name, mother_name } = req.body;
+  const { username, email, password, account_type, device_id, phone, NIN, CAC } = req.body;
 
-  if (!username || !email || !password || !account_type || !device_id || !NIN || !father_name || !mother_name) {
-    return res.json({ error: "All fields (username, email, password, account_type, device_id, NIN, father_name, mother_name) are required" });
+  // Basic required fields check
+  if (!username) return res.json({ error: "Username is required" });
+  if (!email) return res.json({ error: "Email is required" });
+  if (!password) return res.json({ error: "Password is required" });
+  if (!account_type) return res.json({ error: "Account type is required (individual or organization)" });
+  if (!device_id) return res.json({ error: "Device ID is required" });
+  if (!phone) return res.json({ error: "Phone number is required" });
+
+  // Account-type specific ID validation
+  if (account_type === "individual" && !NIN) {
+    return res.json({ error: "NIN is required for individual accounts" });
   }
 
+  if (account_type === "organization" && !CAC) {
+    return res.json({ error: "CAC is required for organization accounts" });
+  }
+
+  // Check for existing email or username
   const existing = users.find(u => u.email === email || u.username === username);
   if (existing) {
-    return res.json({ error: "Email or username already registered. Try login or use different credentials." });
+    return res.json({ error: "Email or username already registered" });
   }
 
   const hashed = await bcrypt.hash(password, 10);
@@ -76,15 +89,18 @@ app.post("/signup", async (req, res) => {
     email,
     password: hashed,
     account_type,
-    NIN,
     phone,
-    father_name,
-    mother_name,
     token,
     token_expiry: expiry,
     device_id: typeof device_id === "string" ? device_id : JSON.stringify(device_id),
     login_attempts: { count: 0, last_reset: Date.now() }
   };
+
+  if (account_type === "individual") {
+    user.NIN = NIN;
+  } else if (account_type === "organization") {
+    user.CAC = CAC;
+  }
 
   users.push(user);
 
@@ -102,7 +118,7 @@ app.post("/login", async (req, res) => {
   const { email, password, device_id } = req.body;
 
   if (!email || !password || !device_id) {
-    return res.json({ error: "Email/Username, password, and device_id are required" });
+    return res.json({ error: "Email/Username, password, and device ID are required" });
   }
 
   const user = users.find(u => u.email === email || u.username === email);
@@ -148,7 +164,7 @@ app.post("/token-login", (req, res) => {
   const { token, device_id } = req.body;
 
   if (!token || !device_id) {
-    return res.json({ error: "Token and device_id are required for token login" });
+    return res.json({ error: "Token and device ID are required for token login" });
   }
 
   const user = users.find(u => u.token === token);
@@ -190,15 +206,21 @@ app.post("/me", (req, res) => {
     return res.json({ error: "Device mismatch" });
   }
 
-  res.json({
+  const response = {
     id: user.id,
     username: user.username,
     email: user.email,
     account_type: user.account_type,
-    NIN: user.NIN,
-    father_name: user.father_name,
-    mother_name: user.mother_name
-  });
+    phone: user.phone
+  };
+
+  if (user.account_type === "individual") {
+    response.NIN = user.NIN;
+  } else if (user.account_type === "organization") {
+    response.CAC = user.CAC;
+  }
+
+  res.json(response);
 });
 
 app.listen(3000, () => console.log("Backend running on port 3000"));
