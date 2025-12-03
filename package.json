@@ -1,19 +1,22 @@
 {
-  "name": "nvc-backend",
+  "name": "nigerian-virtual-community",
   "version": "1.0.0",
-  "description": "Nigerian virtual Community, Powered by Sanne",
+  "description": "Nigerian Virtual Community, powered by Sanne Karibo",
   "type": "module",
-  "main": "index.js",
+  "main": "app.js",
   "scripts": {
-    "start": "node index.js",
-    "dev": "nodemon index.js"
+    "start": "node app.js",
+    "dev": "nodemon app.js"
   },
   "keywords": [
     "express",
     "auth",
     "signup",
     "login",
-    "token"
+    "token",
+    "mongodb",
+    "social",
+    "chat"
   ],
   "author": "NVC Team",
   "license": "MIT",
@@ -23,7 +26,10 @@
     "cors": "^2.8.5",
     "express": "^4.18.2",
     "jsonwebtoken": "^9.0.1",
-    "uuid": "^9.0.0"
+    "mongoose": "^7.5.0",
+    "nodemailer": "^6.9.5",
+    "uuid": "^9.0.0",
+    "dotenv": "^16.3.1"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
