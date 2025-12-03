@@ -4,49 +4,74 @@ import crypto from "crypto";
 import bodyParser from "body-parser";
 import cors from "cors";
 import { v4 as uuidv4 } from "uuid";
+import mongoose from "mongoose";
+import jwt from "jsonwebtoken";
+import nodemailer from "nodemailer";
 
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-// 🟦 SIMPLE IN-MEMORY DATABASE
-let users = [];
+// ------------------------------------------------------------
+// 🔌 CONNECT TO MONGODB USING STORAGE_2
+// ------------------------------------------------------------
+mongoose
+  .connect(process.env.STORAGE_2, {
+    useNewUrlParser: true,
+    useUnifiedTopology: true
+  })
+  .then(() => console.log("✅ MongoDB Connected"))
+  .catch(err => console.log("❌ MongoDB Error:", err));
 
-/*
- users = [
-   {
-     id: "uuid",
-     username: "JohnDoe",
-     email: "test@example.com",
-     password: "hashed password",
-     account_type: "individual" | "organization",
-     NIN: "1234567890",   // for individual
-     CAC: "1234567",      // for organization
-     phone: "+2348109995009",
-     token: "device-bound-token",
-     token_expiry: timestamp,
-     device_id: "fingerprint-string",
-     login_attempts: { count: 0, last_reset: timestamp }
-   }
- ]
-*/
+// ------------------------------------------------------------
+// 📦 USER SCHEMA
+// ------------------------------------------------------------
+const userSchema = new mongoose.Schema({
+  id: String,
+  username: String,
+  email: String,
+  password: String,
+  account_type: String,
+  phone: String,
+  NIN: String,
+  CAC: String,
 
-// 🔒 TOKEN VALIDITY (1 WEEK)
-const TOKEN_LIFETIME = 7 * 24 * 60 * 60 * 1000;
+  device_id: String,
+  token: String,
+  token_expiry: Number,
 
-// 🔐 MAX PASSWORD TRIALS PER ACCOUNT EMAIL DAILY
+  login_attempts: {
+    count: Number,
+    last_reset: Number
+  },
+
+  reset_token: String,
+  reset_expiry: Number
+});
+
+const User = mongoose.model("User", userSchema);
+
+// ------------------------------------------------------------
+// ⚙️ CONSTANTS
+// ------------------------------------------------------------
+const TOKEN_LIFETIME = 7 * 24 * 60 * 60 * 1000; // 1 week
 const MAX_DAILY_TRIALS = 5;
 
-// 🧩 Utility: Create short device-bound token
+// ------------------------------------------------------------
+// 🔑 SHORT TOKEN (device-bound)
+// ------------------------------------------------------------
 function createDeviceBoundToken(user_id, device_id) {
-  const raw = user_id + ":" + device_id;
-  const hash = crypto
-    .createHash("sha256")
-    .update(raw)
-    .digest("base64")
-    .replace(/=/g, "");
+  const raw = `${user_id}:${device_id}`;
+  const hash = crypto.createHash("sha256").update(raw).digest("base64").replace(/=/g, "");
   return hash.substring(0, 32);
 }
+
+// ------------------------------------------------------------
+// 📨 EMAIL TRANSPORT (Fake — logs to console)
+// ------------------------------------------------------------
+const transporter = nodemailer.createTransport({
+  jsonTransport: true
+});
 
 // ------------------------------------------------------------
 // SIGNUP
@@ -54,28 +79,19 @@ function createDeviceBoundToken(user_id, device_id) {
 app.post("/signup", async (req, res) => {
   const { username, email, password, account_type, device_id, phone, NIN, CAC } = req.body;
 
-  // Basic required fields check
   if (!username) return res.json({ error: "Username is required" });
   if (!email) return res.json({ error: "Email is required" });
   if (!password) return res.json({ error: "Password is required" });
-  if (!account_type) return res.json({ error: "Account type is required (individual or organization)" });
   if (!device_id) return res.json({ error: "Device ID is required" });
-  if (!phone) return res.json({ error: "Phone number is required" });
+  if (!account_type) return res.json({ error: "Account type is required" });
 
-  // Account-type specific ID validation
-  if (account_type === "individual" && !NIN) {
-    return res.json({ error: "NIN is required for individual accounts" });
-  }
+  if (account_type === "individual" && !NIN)
+    return res.json({ error: "NIN required for individual" });
+  if (account_type === "organization" && !CAC)
+    return res.json({ error: "CAC required for organization" });
 
-  if (account_type === "organization" && !CAC) {
-    return res.json({ error: "CAC is required for organization accounts" });
-  }
-
-  // Check for existing email or username
-  const existing = users.find(u => u.email === email || u.username === username);
-  if (existing) {
-    return res.json({ error: "Email or username already registered" });
-  }
+  const exist = await User.findOne({ $or: [{ email }, { username }] });
+  if (exist) return res.json({ error: "Email or username already exists" });
 
   const hashed = await bcrypt.hash(password, 10);
   const id = uuidv4();
@@ -83,26 +99,24 @@ app.post("/signup", async (req, res) => {
   const token = createDeviceBoundToken(id, device_id);
   const expiry = Date.now() + TOKEN_LIFETIME;
 
-  const user = {
+  const newUser = new User({
     id,
     username,
     email,
     password: hashed,
     account_type,
     phone,
+    NIN,
+    CAC,
+
+    device_id,
     token,
     token_expiry: expiry,
-    device_id: typeof device_id === "string" ? device_id : JSON.stringify(device_id),
+
     login_attempts: { count: 0, last_reset: Date.now() }
-  };
+  });
 
-  if (account_type === "individual") {
-    user.NIN = NIN;
-  } else if (account_type === "organization") {
-    user.CAC = CAC;
-  }
-
-  users.push(user);
+  await newUser.save();
 
   res.json({
     message: "Signup successful",
@@ -112,115 +126,192 @@ app.post("/signup", async (req, res) => {
 });
 
 // ------------------------------------------------------------
-// LOGIN (email OR username + password → returns SAME token for same device)
+// LOGIN — device always changes (refresh every login)
 // ------------------------------------------------------------
 app.post("/login", async (req, res) => {
   const { email, password, device_id } = req.body;
 
-  if (!email || !password || !device_id) {
-    return res.json({ error: "Email/Username, password, and device ID are required" });
-  }
+  if (!email || !password || !device_id)
+    return res.json({ error: "Email, password and device ID required" });
 
-  const user = users.find(u => u.email === email || u.username === email);
-  if (!user) return res.json({ error: "No account found with this email or username" });
+  const user = await User.findOne({
+    $or: [{ email }, { username: email }]
+  });
 
-  // Reset daily login attempts if needed
+  if (!user) return res.json({ error: "No account found" });
+
   const now = Date.now();
+
+  // Reset login attempts daily
   if (now - user.login_attempts.last_reset > 24 * 60 * 60 * 1000) {
     user.login_attempts.count = 0;
     user.login_attempts.last_reset = now;
   }
 
-  if (user.login_attempts.count >= MAX_DAILY_TRIALS) {
-    return res.json({ error: `Maximum daily login attempts exceeded (${MAX_DAILY_TRIALS}). Try again tomorrow.` });
-  }
+  if (user.login_attempts.count >= MAX_DAILY_TRIALS)
+    return res.json({ error: "Too many attempts. Try again tomorrow" });
 
   const ok = await bcrypt.compare(password, user.password);
   if (!ok) {
     user.login_attempts.count += 1;
-    return res.json({ error: `Invalid login credentials. Attempt ${user.login_attempts.count} of ${MAX_DAILY_TRIALS}` });
+    await user.save();
+    return res.json({ error: "Invalid credentials" });
   }
 
-  if (user.device_id !== (typeof device_id === "string" ? device_id : JSON.stringify(device_id))) {
-    return res.json({ error: "Device mismatch. Please login from your registered device." });
-  }
+  // 🔥 DEVICE INFO ALWAYS UPDATES ON LOGIN
+  user.device_id = device_id;
 
-  // Reset attempts on successful login
-  user.login_attempts.count = 0;
+  // Generate brand-new token for the new device
+  user.token = createDeviceBoundToken(user.id, device_id);
   user.token_expiry = now + TOKEN_LIFETIME;
+
+  user.login_attempts.count = 0;
+  await user.save();
 
   res.json({
     message: "Login successful",
     token: user.token,
-    expiry: user.token_expiry,
-    account_type: user.account_type
+    expiry: user.token_expiry
   });
 });
 
 // ------------------------------------------------------------
-// TOKEN LOGIN (device + token)
+// TOKEN LOGIN — requires password when device changes
 // ------------------------------------------------------------
-app.post("/token-login", (req, res) => {
-  const { token, device_id } = req.body;
+app.post("/token-login", async (req, res) => {
+  const { token, device_id, password } = req.body;
 
-  if (!token || !device_id) {
-    return res.json({ error: "Token and device ID are required for token login" });
-  }
+  if (!token || !device_id)
+    return res.json({ error: "Token and device required" });
 
-  const user = users.find(u => u.token === token);
-  if (!user) return res.json({ error: "Invalid token provided" });
-
-  if (Date.now() > user.token_expiry) {
-    return res.json({ error: "Token has expired, please login again" });
-  }
-
-  if (user.device_id !== (typeof device_id === "string" ? device_id : JSON.stringify(device_id))) {
-    return res.json({ error: "Device mismatch. Token does not belong to this device" });
-  }
-
-  res.json({
-    message: "Token login successful",
-    user: {
-      id: user.id,
-      username: user.username,
-      email: user.email,
-      account_type: user.account_type
-    }
-  });
-});
-
-// ------------------------------------------------------------
-// PROTECTED DATA EXAMPLE (/me)
-// ------------------------------------------------------------
-app.post("/me", (req, res) => {
-  const { token, device_id } = req.body;
-
-  const user = users.find(u => u.token === token);
+  const user = await User.findOne({ token });
   if (!user) return res.json({ error: "Invalid token" });
 
-  if (Date.now() > user.token_expiry) {
-    return res.json({ error: "Token expired. Please login again" });
+  if (Date.now() > user.token_expiry)
+    return res.json({ error: "Token expired" });
+
+  // If device is SAME — login instantly
+  if (user.device_id === device_id) {
+    return res.json({
+      message: "Token login successful (same device)",
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email
+      }
+    });
   }
 
-  if (user.device_id !== (typeof device_id === "string" ? device_id : JSON.stringify(device_id))) {
+  // Device changed → must provide password
+  if (!password)
+    return res.json({
+      error: "Password required because device is different"
+    });
+
+  const ok = await bcrypt.compare(password, user.password);
+  if (!ok) return res.json({ error: "Wrong password" });
+
+  // ✔ Password correct → update device & generate new token
+  user.device_id = device_id;
+  user.token = createDeviceBoundToken(user.id, device_id);
+  user.token_expiry = Date.now() + TOKEN_LIFETIME;
+  await user.save();
+
+  res.json({
+    message: "Token login successful (device updated)",
+    token: user.token,
+    expiry: user.token_expiry
+  });
+});
+
+// ------------------------------------------------------------
+// PASSWORD RECOVERY — step 1: request reset link
+// ------------------------------------------------------------
+app.post("/recover", async (req, res) => {
+  const { email } = req.body;
+
+  const user = await User.findOne({ email });
+  if (!user) return res.json({ error: "No account with that email" });
+
+  const reset_token = jwt.sign(
+    { email },
+    process.env.RESET_SECRET,
+    { expiresIn: "15m" }
+  );
+
+  user.reset_token = reset_token;
+  user.reset_expiry = Date.now() + 15 * 60 * 1000;
+  await user.save();
+
+  transporter.sendMail({
+    to: email,
+    subject: "Password Reset",
+    text: `Use this code to reset your password:\n\n${reset_token}`
+  });
+
+  res.json({
+    message: "Password reset token sent to email"
+  });
+});
+
+// ------------------------------------------------------------
+// PASSWORD RESET — step 2
+// ------------------------------------------------------------
+app.post("/reset-password", async (req, res) => {
+  const { token, new_password } = req.body;
+
+  if (!token || !new_password)
+    return res.json({ error: "Token and new password are required" });
+
+  let payload;
+  try {
+    payload = jwt.verify(token, process.env.RESET_SECRET);
+  } catch {
+    return res.json({ error: "Invalid or expired token" });
+  }
+
+  const user = await User.findOne({ email: payload.email });
+  if (!user) return res.json({ error: "Account no longer exists" });
+
+  if (user.reset_token !== token)
+    return res.json({ error: "Token mismatch" });
+
+  if (Date.now() > user.reset_expiry)
+    return res.json({ error: "Reset token expired" });
+
+  user.password = await bcrypt.hash(new_password, 10);
+  user.reset_token = null;
+  user.reset_expiry = null;
+  await user.save();
+
+  res.json({ message: "Password reset successful" });
+});
+
+// ------------------------------------------------------------
+// PROTECTED ROUTE
+// ------------------------------------------------------------
+app.post("/me", async (req, res) => {
+  const { token, device_id } = req.body;
+
+  const user = await User.findOne({ token });
+  if (!user) return res.json({ error: "Invalid token" });
+
+  if (Date.now() > user.token_expiry)
+    return res.json({ error: "Token expired" });
+
+  if (user.device_id !== device_id)
     return res.json({ error: "Device mismatch" });
-  }
 
-  const response = {
+  res.json({
     id: user.id,
     username: user.username,
     email: user.email,
     account_type: user.account_type,
-    phone: user.phone
-  };
-
-  if (user.account_type === "individual") {
-    response.NIN = user.NIN;
-  } else if (user.account_type === "organization") {
-    response.CAC = user.CAC;
-  }
-
-  res.json(response);
+    phone: user.phone,
+    NIN: user.NIN,
+    CAC: user.CAC
+  });
 });
 
+// ------------------------------------------------------------
 app.listen(3000, () => console.log("Backend running on port 3000"));
