@@ -278,6 +278,34 @@ app.post("/search-users", async (req, res) => {
     res.json({ error: "Search failed" });
   }
 });
+// ------------------------- GET CURRENT USER (/me) -------------------------
+app.post("/me", async (req, res) => {
+  const endpoint = "/me";
+  const { token, device_id } = req.body;
+
+  if (!token || !device_id) {
+    logApiCall(endpoint, req.body, null, false, "Missing token or device_id");
+    return res.json({ error: "Missing token or device_id" });
+  }
+
+  try {
+    const user = await authMiddleware(token, device_id);
+    if (!user) {
+      logApiCall(endpoint, req.body, null, false, "Unauthorized");
+      return res.json({ error: "Unauthorized" });
+    }
+
+    // Exclude password from response
+    const { password, ...userData } = user.toObject();
+
+    logApiCall(endpoint, req.body, user.id, true, "Fetched user data");
+    res.json({ user: userData });
+  } catch (err) {
+    console.error("GET /me error:", err);
+    logApiCall(endpoint, req.body, null, false, "Server error");
+    res.json({ error: "Failed to fetch user data" });
+  }
+});
 
 // ------------------------- SERVER -------------------------
 app.listen(3000, () => console.log("Backend running on port 3000"));
