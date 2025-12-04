@@ -27,22 +27,21 @@ const userSchema = new mongoose.Schema({
   phone: String,
   NIN: String,
   CAC: String,
-  device_id: String,
-  token: String,
+
+  device_id: String,      // bound to last successful login
+  token: String,          // regenerated every successful login
   token_expiry: Number,
+
   login_attempts: { count: Number, last_reset: Number },
   reset_token: String,
   reset_expiry: Number,
 
-  // OPTIONAL FIELDS
   dob: String,
   marital_status: String,
   gender: String,
   address: String,
-
-  // NEW DESCRIPTION FIELDS
   individual_description: String,
-  organizational_description: String,
+  organizational_description: String
 });
 
 const User = mongoose.model("User", userSchema);
@@ -57,18 +56,17 @@ const postSchema = new mongoose.Schema({
   comments: [
     { id: String, user_id: String, text: String, created_at: Number }
   ],
-  created_at: { type: Number, default: Date.now },
+  created_at: { type: Number, default: Date.now }
 });
 
 const Post = mongoose.model("Post", postSchema);
 
-// -----------------------------------------------------------
 const chatSchema = new mongoose.Schema({
   id: { type: String, default: () => uuidv4() },
   from_id: String,
   to_id: String,
   message: String,
-  created_at: { type: Number, default: Date.now },
+  created_at: { type: Number, default: Date.now }
 });
 
 const Chat = mongoose.model("Chat", chatSchema);
@@ -80,27 +78,49 @@ const MAX_DAILY_TRIALS = 5;
 const transporter = nodemailer.createTransport({ jsonTransport: true });
 
 // ------------------------- Helpers -------------------------
-const createDeviceToken = (user_id, device_id) =>
+
+// ❗ NEW TOKEN CREATOR: No device_id used anymore
+const createNewToken = (user_id) =>
   crypto
     .createHash("sha256")
-    .update(`${user_id}:${device_id}`)
+    .update(user_id + ":" + crypto.randomUUID())
     .digest("base64")
     .replace(/=/g, "")
     .substring(0, 32);
 
-const authMiddleware = async (token, device_id) => {
-  if (!token || !device_id) return null;
-  try {
-    const user = await User.findOne({ token });
-    if (!user) return null;
-    if (user.device_id !== device_id) return null;
-    if (Date.now() > user.token_expiry) return null;
-    return user;
-  } catch (err) {
-    console.error("Auth middleware error:", err);
-    return null;
+
+// ------------------------- AUTH MIDDLEWARE -------------------------
+const authMiddleware = async (token, device_id, password) => {
+  if (!token) return { error: "Missing token" };
+
+  const user = await User.findOne({ token });
+  if (!user) return { error: "Invalid token" };
+
+  if (Date.now() > user.token_expiry)
+    return { error: "Token expired" };
+
+  // Device check only on token login
+  if(device_id == user.device_id) return {user};
+ else if ( !password) {
+    console.log(
+      "UNKNOWN DEVICE ATTEMPTED TOKEN LOGIN FOR => " +
+      user.username +
+      "\nDEVICE USED: " + device_id +
+      "\nREGISTERED DEVICE: " + user.device_id
+    );
+    return { error: "Hacking Detected--- Shutting down Account." };
   }
+
+  
+  const validPass = await bcrypt.compare(password || "", user.password);
+  if (!validPass) {
+    console.log("WRONG PASSWORD DURING TOKEN LOGIN => " + user.username);
+    return { error: "Invalid credentials for token login" };
+  }
+
+  return { user };
 };
+
 
 // ------------------------- Logger -------------------------
 const logApiCall = (endpoint, reqBody, userId, success, message) => {
@@ -124,40 +144,33 @@ app.post("/signup", async (req, res) => {
       phone,
       NIN,
       CAC,
-
-      // Optional fields
       dob,
       marital_status,
       gender,
       address,
       individual_description,
-      organizational_description,
+      organizational_description
     } = req.body;
 
     if (!username || !password || !device_id || !account_type || (!email && !phone)) {
       logApiCall(endpoint, req.body, null, false, "Missing required fields");
       return res.json({
-        error: "Missing required fields: username, password, device_id, account_type, and email or phone",
+        error: "Missing fields: username, password, device_id, account_type, and email or phone"
       });
     }
 
-    if (account_type === "individual" && !NIN) {
-      logApiCall(endpoint, req.body, null, false, "Missing NIN");
+    if (account_type === "individual" && !NIN)
       return res.json({ error: "NIN is required for individual accounts" });
-    }
-    if (account_type === "organization" && !CAC) {
-      logApiCall(endpoint, req.body, null, false, "Missing CAC");
-      return res.json({ error: "CAC is required for organization accounts" });
-    }
 
-    if (await User.findOne({ $or: [{ email }, { phone }] })) {
-      logApiCall(endpoint, req.body, null, false, "Account exists");
+    if (account_type === "organization" && !CAC)
+      return res.json({ error: "CAC is required for organization accounts" });
+
+    if (await User.findOne({ $or: [{ email }, { phone }] }))
       return res.json({ error: "Email or phone already exists" });
-    }
 
     const hashed = await bcrypt.hash(password, 10);
     const id = uuidv4();
-    const token = createDeviceToken(id, device_id);
+    const token = createNewToken(id);
     const expiry = Date.now() + TOKEN_LIFETIME;
 
     await new User({
@@ -179,15 +192,15 @@ app.post("/signup", async (req, res) => {
       gender,
       address,
       individual_description,
-      organizational_description,
+      organizational_description
     }).save();
 
     logApiCall(endpoint, req.body, id, true, "Signup successful");
     res.json({ message: "Signup successful", token, expiry });
   } catch (err) {
-    console.error("Signup error:", err);
+    console.error(err);
     logApiCall(endpoint, req.body, null, false, "Server error");
-    res.json({ error: "Signup failed, check server logs" });
+    res.json({ error: "Signup failed" });
   }
 });
 
@@ -197,16 +210,12 @@ app.post("/login", async (req, res) => {
   try {
     const { email, phone, password, device_id } = req.body;
 
-    if ((!email && !phone) || !password || !device_id) {
-      logApiCall(endpoint, req.body, null, false, "Missing credentials");
+    if ((!email && !phone) || !password || !device_id)
       return res.json({ error: "Missing: email or phone, password, device_id" });
-    }
 
     const user = await User.findOne({ $or: [{ email }, { phone }] });
-    if (!user) {
-      logApiCall(endpoint, req.body, null, false, "Account not found");
+    if (!user)
       return res.json({ error: "No account found" });
-    }
 
     const now = Date.now();
 
@@ -215,22 +224,19 @@ app.post("/login", async (req, res) => {
       user.login_attempts.last_reset = now;
     }
 
-    if (user.login_attempts.count >= MAX_DAILY_TRIALS) {
-      logApiCall(endpoint, req.body, user.id, false, "Too many attempts");
+    if (user.login_attempts.count >= MAX_DAILY_TRIALS)
       return res.json({ error: "Too many login attempts today" });
-    }
 
     const valid = await bcrypt.compare(password, user.password);
-
     if (!valid) {
       user.login_attempts.count++;
       await user.save();
-      logApiCall(endpoint, req.body, user.id, false, "Invalid password");
       return res.json({ error: "Invalid credentials" });
     }
 
+    // Successful login = always replace token + device_id
     user.device_id = device_id;
-    user.token = createDeviceToken(user.id, device_id);
+    user.token = createNewToken(user.id);
     user.token_expiry = now + TOKEN_LIFETIME;
     user.login_attempts.count = 0;
     await user.save();
@@ -238,8 +244,7 @@ app.post("/login", async (req, res) => {
     logApiCall(endpoint, req.body, user.id, true, "Login successful");
     res.json({ message: "Login successful", token: user.token, expiry: user.token_expiry });
   } catch (err) {
-    console.error("Login error:", err);
-    logApiCall(endpoint, req.body, null, false, "Server error");
+    console.error(err);
     res.json({ error: "Login failed" });
   }
 });
@@ -249,16 +254,17 @@ app.post("/search-users", async (req, res) => {
   const endpoint = "/search-users";
   const { token, device_id, username } = req.body;
 
-  if (!token || !device_id || !username) {
-    logApiCall(endpoint, req.body, null, false, "Missing search params");
+  if (!token || !device_id || !username)
     return res.json({ error: "Missing: token, device_id, username" });
+
+  const auth = await authMiddleware(token, device_id);
+
+  if (auth.error) {
+    logApiCall(endpoint, req.body, null, false, auth.error);
+    return res.json({ error: auth.error });
   }
 
-  const authUser = await authMiddleware(token, device_id);
-  if (!authUser) {
-    logApiCall(endpoint, req.body, null, false, "Unauthorized");
-    return res.json({ error: "Unauthorized" });
-  }
+  const user = auth.user;
 
   try {
     const regex = new RegExp(username, "i");
@@ -267,45 +273,31 @@ app.post("/search-users", async (req, res) => {
       id username email phone account_type
       dob marital_status gender address
       NIN CAC individual_description organizational_description
-      created_at
     `);
 
-    logApiCall(endpoint, req.body, authUser.id, true, "Search successful");
+    logApiCall(endpoint, req.body, user.id, true, "Search OK");
     res.json({ results: users });
   } catch (err) {
-    console.error("Search error:", err);
-    logApiCall(endpoint, req.body, authUser.id, false, "Search failed");
+    console.error(err);
     res.json({ error: "Search failed" });
   }
 });
-// ------------------------- GET CURRENT USER (/me) -------------------------
+
+// ------------------------- GET CURRENT USER -------------------------
 app.post("/me", async (req, res) => {
-  const endpoint = "/me";
-  const { token, device_id } = req.body;
+  const { token, device_id, password: loginPassword } = req.body;
 
-  if (!token || !device_id) {
-    logApiCall(endpoint, req.body, null, false, "Missing token or device_id");
-    return res.json({ error: "Missing token or device_id" });
-  }
+  if (!token) return res.json({ success: false, reason: "Missing token" });
+  if (!device_id && !loginPassword) return res.json({ success: false, reason: "Provide device_id or password" });
 
-  try {
-    const user = await authMiddleware(token, device_id);
-    if (!user) {
-      logApiCall(endpoint, req.body, null, false, "Unauthorized");
-      return res.json({ error: "Unauthorized" });
-    }
+  const auth = await authMiddleware({ token, device_id, loginPassword });
+  if (auth.error) return res.json({ success: false, reason: auth.error });
 
-    // Exclude password from response
-    const { password, ...userData } = user.toObject();
-
-    logApiCall(endpoint, req.body, user.id, true, "Fetched user data");
-    res.json({ user: userData });
-  } catch (err) {
-    console.error("GET /me error:", err);
-    logApiCall(endpoint, req.body, null, false, "Server error");
-    res.json({ error: "Failed to fetch user data" });
-  }
+  const { password, ...userData } = auth.user.toObject();
+  logApiCall("/me", req.body, auth.user.id, true, "Fetched /me");
+  res.json({ success: true, user: userData });
 });
+)
 
 // ------------------------- SERVER -------------------------
 app.listen(3000, () => console.log("Backend running on port 3000"));
