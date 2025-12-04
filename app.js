@@ -297,7 +297,7 @@ app.post("/me", async (req, res) => {
   logApiCall("/me", req.body, auth.user.id, true, "Fetched /me");
   res.json({ success: true, user: userData });
 });
-)
+
 
 // ------------------------- SERVER -------------------------
 app.listen(3000, () => console.log("Backend running on port 3000"));
