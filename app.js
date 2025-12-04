@@ -11,7 +11,7 @@ const app = express();
 app.use(cors({
   origin: "*",            // allow all origins or replace with your frontend URL
   methods: ["GET","POST","OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"]
+  allowedHeaders: ["*"]
 }));
 app.use(bodyParser.json());
 
