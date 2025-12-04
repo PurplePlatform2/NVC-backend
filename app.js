@@ -294,7 +294,7 @@ app.post("/me", async (req, res) => {
   if (!token) return res.json({ success: false, reason: "Missing token" });
   if (!device_id && !loginPassword) return res.json({ success: false, reason: "Provide device_id or password" });
 
-  const auth = await authMiddleware({ token, device_id, loginPassword });
+  const auth = await authMiddleware(token, device_id, loginPassword);
   if (auth.error) return res.json({ success: false, reason: auth.error });
 
   const { password, ...userData } = auth.user.toObject();
