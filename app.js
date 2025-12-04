@@ -8,7 +8,11 @@ import mongoose from "mongoose";
 import nodemailer from "nodemailer";
 
 const app = express();
-app.use(cors());
+app.use(cors({
+  origin: "*",            // allow all origins or replace with your frontend URL
+  methods: ["GET","POST","OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"]
+}));
 app.use(bodyParser.json());
 
 // ------------------------- MongoDB -------------------------
