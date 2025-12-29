@@ -1,3 +1,4 @@
+
 import express from "express";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
@@ -302,6 +303,41 @@ app.post("/me", async (req, res) => {
   res.json({ success: true, user: userData });
 });
 
+//-----------EDIT USER DETAILS-------------//
+// ------------------------- UPDATE PROFILE -------------------------
+app.post("/update-profile", async (req, res) => {
+  const endpoint = "/update-profile";
+  const { token, device_id, user } = req.body;
+
+  if (!token || !device_id || !user) {
+    logApiCall(endpoint, req.body, null, false, "Missing token, device_id, or user object");
+    return res.json({ success: false, reason: "Missing authentication or user data" });
+  }
+
+  try {
+    const auth = await authMiddleware(token, device_id);
+    if (auth.error) {
+      logApiCall(endpoint, req.body, null, false, auth.error);
+      return res.json({ success: false, reason: auth.error });
+    }
+
+    const dbUser = auth.user;
+    const allowedUpdates = ["dob","gender","marital_status","phone","address","individual_description","organizational_description"]
+      .reduce((acc, key) => (user[key] !== undefined && (acc[key] = user[key]), acc), {});
+
+    Object.assign(dbUser, allowedUpdates);
+    await dbUser.save();
+
+    const { password, ...safeUser } = dbUser.toObject();
+    logApiCall(endpoint, req.body, dbUser.id, true, "Profile updated");
+    res.json({ success: true, message: "Profile updated successfully", user: safeUser });
+
+  } catch (err) {
+    console.error(err);
+    logApiCall(endpoint, req.body, null, false, "Server error");
+    res.json({ success: false, reason: "Update failed" });
+  }
+});
 
 // ------------------------- SERVER -------------------------
 app.listen(3000, () => console.log("Backend running on port 3000"));
