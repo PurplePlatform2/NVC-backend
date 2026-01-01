@@ -1,4 +1,3 @@
-
 import express from "express";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
@@ -10,8 +9,8 @@ import nodemailer from "nodemailer";
 
 const app = express();
 app.use(cors({
-  origin: "*",            // allow all origins or replace with your frontend URL
-  methods: ["GET","POST","OPTIONS"],
+  origin: "*",
+  methods: ["GET", "POST", "OPTIONS"],
   allowedHeaders: ["*"]
 }));
 app.use(bodyParser.json());
@@ -20,9 +19,19 @@ app.use(bodyParser.json());
 mongoose
   .connect(process.env.STORAGE_2, { useNewUrlParser: true, useUnifiedTopology: true })
   .then(() => console.log("✅ MongoDB Connected"))
-  .catch((err) => console.error("❌ MongoDB Connection Error:", err));
+  .catch(err => console.error("❌ MongoDB Connection Error:", err));
 
-// ------------------------- Schemas -------------------------
+// ------------------------- COMMON SCHEMAS -------------------------
+const visibility = { type: String, enum: ["public", "private", "selected"], default: "private" };
+
+const fileSchema = new mongoose.Schema({
+  id: { type: String, default: uuidv4 },
+  url: String,
+  type: String,
+  created_at: { type: Number, default: Date.now }
+}, { _id: false });
+
+// ------------------------- USER SCHEMA -------------------------
 const userSchema = new mongoose.Schema({
   id: String,
   username: String,
@@ -33,311 +42,347 @@ const userSchema = new mongoose.Schema({
   NIN: String,
   CAC: String,
 
-  device_id: String,      // bound to last successful login
-  token: String,          // regenerated every successful login
+  device_id: String,
+  token: String,
   token_expiry: Number,
 
   login_attempts: { count: Number, last_reset: Number },
   reset_token: String,
   reset_expiry: Number,
 
-  dob: String,
-  marital_status: String,
-  gender: String,
-  address: String,
-  individual_description: String,
-  organizational_description: String
+  // ---------- PERSONAL ----------
+  personal: {
+    dob: String,
+    gender: String,
+    marital_status: String,
+    nationality: String,
+    state_of_origin: String,
+    lga: String,
+    religion: String,
+    address: String,
+    blood_group: String,
+    genotype: String,
+    disabilities: String,
+    hobbies: [String],
+    likes: [String],
+    dislikes: [String],
+    languages: [String],
+    links: [String],
+    visibility
+  },
+
+  // ---------- FAMILY ----------
+  family: {
+    family_type: String,
+    father: String,
+    mother: String,
+    stepfather: String,
+    stepmother: String,
+    siblings: [{ name: String, gender: String }],
+    address: String,
+    visibility
+  },
+
+  // ---------- EDUCATION ----------
+  education: {
+    schools: [{
+      id: { type: String, default: uuidv4 },
+      name: String,
+      start_date: String,
+      end_date: String,
+      levels: [String],
+      positions: [fileSchema],
+      results: [fileSchema],
+      awards: [fileSchema],
+      visibility
+    }],
+    certificates: [{
+      id: { type: String, default: uuidv4 },
+      title: String,
+      type: String,
+      year: String,
+      files: [fileSchema],
+      visibility
+    }]
+  },
+
+  // ---------- OCCUPATION ----------
+  occupations: {
+    self_employed: [{
+      id: { type: String, default: uuidv4 },
+      name: String,
+      description: String,
+      location: String,
+      experience: String,
+      work_time: String,
+      income_range: String,
+      contacts: { phone: String, email: String },
+      links: [String],
+      certifications: [fileSchema],
+      services: [{
+        id: { type: String, default: uuidv4 },
+        title: String,
+        description: String,
+        quantity: Number,
+        condition: String,
+        price: String,
+        images: [fileSchema],
+        rating: Number
+      }],
+      previous_jobs: [fileSchema],
+      visibility
+    }],
+
+    job_seeker: [{
+      id: { type: String, default: uuidv4 },
+      position: String,
+      description: String,
+      preferred_location: String,
+      experience: String,
+      income_range: String,
+      contacts: { phone: String, email: String },
+      attachments: [fileSchema],
+      comments: String,
+      visibility
+    }],
+
+    employed: [{
+      id: { type: String, default: uuidv4 },
+      company: String,
+      position: String,
+      description: String,
+      work_type: String,
+      duration: String,
+      salary: String,
+      location: String,
+      credentials: [fileSchema],
+      awards: [fileSchema],
+      previous_positions: [String],
+      contacts: { phone: String, email: String },
+      links: [String],
+      visibility
+    }]
+  },
+
+  // ---------- PROPERTIES ----------
+  properties: [{
+    id: { type: String, default: uuidv4 },
+    name: String,
+    description: String,
+    acquisition: String,
+    cost: String,
+    images: [fileSchema],
+    documents: [fileSchema],
+    visibility
+  }],
+
+  // ---------- TRANSACTIONS ----------
+  transactions: [{
+    id: { type: String, default: uuidv4 },
+    type: { type: String, enum: ["purchase", "rental", "gift"] },
+    seller: String,
+    buyer: String,
+    items: String,
+    quantity: Number,
+    unit_price: String,
+    total_price: String,
+    status: String,
+    date: String,
+    documents: [fileSchema]
+  }],
+
+  // ---------- MEDIA ----------
+  media: [{
+    id: { type: String, default: uuidv4 },
+    file: fileSchema,
+    title: String,
+    description: String,
+    rating: Number,
+    likes: Number,
+    dislikes: Number,
+    created_at: { type: Number, default: Date.now },
+    visibility
+  }],
+
+  // ---------- MERITS / DEMERITS ----------
+  merits: [{
+    title: String,
+    institution: String,
+    date: String,
+    files: [fileSchema]
+  }],
+
+  demerits: [{
+    crime: String,
+    severity: String,
+    conviction_date: String,
+    authority: String,
+    punishment: String,
+    files: [fileSchema]
+  }],
+
+  created_at: { type: Number, default: Date.now }
 });
 
 const User = mongoose.model("User", userSchema);
 
-// -----------------------------------------------------------
+// ------------------------- POSTS -------------------------
 const postSchema = new mongoose.Schema({
-  id: { type: String, default: () => uuidv4() },
+  id: { type: String, default: uuidv4 },
   author_id: String,
   content: String,
   media: [String],
   likes: { type: Number, default: 0 },
-  comments: [
-    { id: String, user_id: String, text: String, created_at: Number }
-  ],
+  comments: [{ id: String, user_id: String, text: String, created_at: Number }],
   created_at: { type: Number, default: Date.now }
 });
-
 const Post = mongoose.model("Post", postSchema);
 
+// ------------------------- CHATS -------------------------
 const chatSchema = new mongoose.Schema({
-  id: { type: String, default: () => uuidv4() },
+  id: { type: String, default: uuidv4 },
   from_id: String,
   to_id: String,
   message: String,
   created_at: { type: Number, default: Date.now }
 });
-
 const Chat = mongoose.model("Chat", chatSchema);
 
-// ------------------------- Constants -------------------------
+// ------------------------- CONSTANTS -------------------------
 const TOKEN_LIFETIME = 7 * 24 * 60 * 60 * 1000;
 const MAX_DAILY_TRIALS = 5;
-
 const transporter = nodemailer.createTransport({ jsonTransport: true });
 
-// ------------------------- Helpers -------------------------
-
-// ❗ NEW TOKEN CREATOR: No device_id used anymore
+// ------------------------- HELPERS -------------------------
 const createNewToken = (user_id) =>
-  crypto
-    .createHash("sha256")
+  crypto.createHash("sha256")
     .update(user_id + ":" + crypto.randomUUID())
     .digest("base64")
     .replace(/=/g, "")
     .substring(0, 32);
 
-
-// ------------------------- AUTH MIDDLEWARE -------------------------
+// ------------------------- AUTH -------------------------
 const authMiddleware = async (token, device_id, password) => {
   if (!token) return { error: "Missing token" };
-
   const user = await User.findOne({ token });
   if (!user) return { error: "Invalid token" };
+  if (Date.now() > user.token_expiry) return { error: "Token expired" };
 
-  if (Date.now() > user.token_expiry)
-    return { error: "Token expired" };
+  if (device_id === user.device_id) return { user };
+  if (!password) return { error: "Hacking Detected--- Shutting down Account." };
 
-  // Device check only on token login
-  if(device_id == user.device_id) return {user};
- else if ( !password) {
-    console.log(
-      "UNKNOWN DEVICE ATTEMPTED TOKEN LOGIN FOR => " +
-      user.username +
-      "\nDEVICE USED: " + device_id +
-      "\nREGISTERED DEVICE: " + user.device_id
-    );
-    return { error: "Hacking Detected--- Shutting down Account." };
-  }
-
-  
-  const validPass = await bcrypt.compare(password || "", user.password);
-  if (!validPass) {
-    console.log("WRONG PASSWORD DURING TOKEN LOGIN => " + user.username);
-    return { error: "Invalid credentials for token login" };
-  }
+  const valid = await bcrypt.compare(password, user.password);
+  if (!valid) return { error: "Invalid credentials" };
 
   return { user };
 };
 
-
-// ------------------------- Logger -------------------------
-const logApiCall = (endpoint, reqBody, userId, success, message) => {
-  console.log(
-    `[${new Date().toISOString()}] [${endpoint}] User:${userId || "N/A"} | ${success ? "SUCCESS" : "FAIL"} | ${message} | Body:${JSON.stringify(
-      reqBody
-    )}`
-  );
+// ------------------------- LOGGER -------------------------
+const logApiCall = (endpoint, body, userId, success, msg) => {
+  console.log(`[${new Date().toISOString()}] ${endpoint} | ${userId || "N/A"} | ${success ? "OK" : "FAIL"} | ${msg}`);
 };
 
 // ------------------------- SIGNUP -------------------------
 app.post("/signup", async (req, res) => {
   const endpoint = "/signup";
   try {
-    const {
-      username,
-      email,
-      password,
-      account_type,
-      device_id,
-      phone,
-      NIN,
-      CAC,
-      dob,
-      marital_status,
-      gender,
-      address,
-      individual_description,
-      organizational_description
-    } = req.body;
+    const { username, email, phone, password, account_type, device_id, NIN, CAC } = req.body;
 
-    if (!username || !password || !device_id || !account_type || (!email && !phone)) {
-      logApiCall(endpoint, req.body, null, false, "Missing required fields");
-      return res.json({
-        error: "Missing fields: username, password, device_id, account_type, and email or phone"
-      });
-    }
+    if (!username || !password || !device_id || !account_type)
+      return res.json({ error: "Missing required fields" });
 
     if (account_type === "individual" && !NIN)
-      return res.json({ error: "NIN is required for individual accounts" });
+      return res.json({ error: "NIN required" });
 
     if (account_type === "organization" && !CAC)
-      return res.json({ error: "CAC is required for organization accounts" });
+      return res.json({ error: "CAC required" });
 
     if (await User.findOne({ $or: [{ email }, { phone }] }))
-      return res.json({ error: "Email or phone already exists" });
+      return res.json({ error: "Email or phone exists" });
 
     const hashed = await bcrypt.hash(password, 10);
     const id = uuidv4();
-    const token = createNewToken(id);
-    const expiry = Date.now() + TOKEN_LIFETIME;
 
-    await new User({
+    const user = await new User({
       id,
       username,
       email,
+      phone,
       password: hashed,
       account_type,
-      phone,
       NIN,
       CAC,
       device_id,
-      token,
-      token_expiry: expiry,
-      login_attempts: { count: 0, last_reset: Date.now() },
-
-      dob,
-      marital_status,
-      gender,
-      address,
-      individual_description,
-      organizational_description
+      token: createNewToken(id),
+      token_expiry: Date.now() + TOKEN_LIFETIME,
+      login_attempts: { count: 0, last_reset: Date.now() }
     }).save();
 
-    logApiCall(endpoint, req.body, id, true, "Signup successful");
-    res.json({ message: "Signup successful", token, expiry });
-  } catch (err) {
-    console.error(err);
-    logApiCall(endpoint, req.body, null, false, "Server error");
+    logApiCall(endpoint, req.body, id, true, "Signup");
+    res.json({ message: "Signup successful", token: user.token });
+
+  } catch (e) {
+    logApiCall(endpoint, req.body, null, false, "Error");
     res.json({ error: "Signup failed" });
   }
 });
 
 // ------------------------- LOGIN -------------------------
 app.post("/login", async (req, res) => {
-  const endpoint = "/login";
-  try {
-    const { email, phone, password, device_id } = req.body;
+  const { email, phone, password, device_id } = req.body;
 
-    if ((!email && !phone) || !password || !device_id)
-      return res.json({ error: "Missing: email or phone, password, device_id" });
+  if ((!email && !phone) || !password || !device_id)
+    return res.json({ error: "Missing login data" });
 
-    const user = await User.findOne({ $or: [{ email }, { phone }] });
-    if (!user)
-      return res.json({ error: "No account found" });
+  const user = await User.findOne({ $or: [{ email }, { phone }] });
+  if (!user) return res.json({ error: "Account not found" });
 
-    const now = Date.now();
+  const valid = await bcrypt.compare(password, user.password);
+  if (!valid) return res.json({ error: "Invalid credentials" });
 
-    if (now - (user.login_attempts.last_reset || 0) > 86400000) {
-      user.login_attempts.count = 0;
-      user.login_attempts.last_reset = now;
-    }
+  user.device_id = device_id;
+  user.token = createNewToken(user.id);
+  user.token_expiry = Date.now() + TOKEN_LIFETIME;
+  await user.save();
 
-    if (user.login_attempts.count >= MAX_DAILY_TRIALS)
-      return res.json({ error: "Too many login attempts today" });
-
-    const valid = await bcrypt.compare(password, user.password);
-    if (!valid) {
-      user.login_attempts.count++;
-      await user.save();
-      return res.json({ error: "Invalid credentials" });
-    }
-
-    // Successful login = always replace token + device_id
-    user.device_id = device_id;
-    user.token = createNewToken(user.id);
-    user.token_expiry = now + TOKEN_LIFETIME;
-    user.login_attempts.count = 0;
-    await user.save();
-
-    logApiCall(endpoint, req.body, user.id, true, "Login successful");
-    res.json({ message: "Login successful", token: user.token, expiry: user.token_expiry });
-  } catch (err) {
-    console.error(err);
-    res.json({ error: "Login failed" });
-  }
+  res.json({ message: "Login successful", token: user.token });
 });
 
 // ------------------------- SEARCH USERS -------------------------
 app.post("/search-users", async (req, res) => {
-  const endpoint = "/search-users";
   const { token, device_id, username } = req.body;
-
-  if (!token || !device_id || !username)
-    return res.json({ error: "Missing: token, device_id, username" });
-
   const auth = await authMiddleware(token, device_id);
+  if (auth.error) return res.json({ error: auth.error });
 
-  if (auth.error) {
-    logApiCall(endpoint, req.body, null, false, auth.error);
-    return res.json({ error: auth.error });
-  }
+  const users = await User.find({ username: new RegExp(username, "i") })
+    .select("id username email phone account_type personal");
 
-  const user = auth.user;
-
-  try {
-    const regex = new RegExp(username, "i");
-
-    const users = await User.find({ username: regex }).select(`
-      id username email phone account_type
-      dob marital_status gender address
-      NIN CAC individual_description organizational_description
-    `);
-
-    logApiCall(endpoint, req.body, user.id, true, "Search OK");
-    res.json({ results: users });
-  } catch (err) {
-    console.error(err);
-    res.json({ error: "Search failed" });
-  }
+  res.json({ results: users });
 });
 
-// ------------------------- GET CURRENT USER -------------------------
+// ------------------------- ME -------------------------
 app.post("/me", async (req, res) => {
-  const { token, device_id, password: loginPassword } = req.body;
+  const { token, device_id, password } = req.body;
+  const auth = await authMiddleware(token, device_id, password);
+  if (auth.error) return res.json({ error: auth.error });
 
-  if (!token) return res.json({ success: false, reason: "Missing token" });
-  if (!device_id && !loginPassword) return res.json({ success: false, reason: "Provide device_id or password" });
-
-  const auth = await authMiddleware(token, device_id, loginPassword);
-  if (auth.error) return res.json({ success: false, reason: auth.error });
-
-  const { password, ...userData } = auth.user.toObject();
-  logApiCall("/me", req.body, auth.user.id, true, "Fetched /me");
-  res.json({ success: true, user: userData });
+  const { password: _, ...safe } = auth.user.toObject();
+  res.json({ success: true, user: safe });
 });
 
-//-----------EDIT USER DETAILS-------------//
 // ------------------------- UPDATE PROFILE -------------------------
 app.post("/update-profile", async (req, res) => {
-  const endpoint = "/update-profile";
   const { token, device_id, user } = req.body;
+  const auth = await authMiddleware(token, device_id);
+  if (auth.error) return res.json({ error: auth.error });
 
-  if (!token || !device_id || !user) {
-    logApiCall(endpoint, req.body, null, false, "Missing token, device_id, or user object");
-    return res.json({ success: false, reason: "Missing authentication or user data" });
-  }
+  Object.assign(auth.user, user);
+  await auth.user.save();
 
-  try {
-    const auth = await authMiddleware(token, device_id);
-    if (auth.error) {
-      logApiCall(endpoint, req.body, null, false, auth.error);
-      return res.json({ success: false, reason: auth.error });
-    }
-
-    const dbUser = auth.user;
-    const allowedUpdates = ["dob","gender","marital_status","phone","address","individual_description","organizational_description"]
-      .reduce((acc, key) => (user[key] !== undefined && (acc[key] = user[key]), acc), {});
-
-    Object.assign(dbUser, allowedUpdates);
-    await dbUser.save();
-
-    const { password, ...safeUser } = dbUser.toObject();
-    logApiCall(endpoint, req.body, dbUser.id, true, "Profile updated");
-    res.json({ success: true, message: "Profile updated successfully", user: safeUser });
-
-  } catch (err) {
-    console.error(err);
-    logApiCall(endpoint, req.body, null, false, "Server error");
-    res.json({ success: false, reason: "Update failed" });
-  }
+  const { password, ...safe } = auth.user.toObject();
+  res.json({ success: true, user: safe });
 });
 
 // ------------------------- SERVER -------------------------
-app.listen(3000, () => console.log("Backend running on port 3000"));
+app.listen(3000, () => console.log("🚀 Backend running on port 3000"));
+
