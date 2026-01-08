@@ -361,28 +361,107 @@ app.post("/search-users", async (req, res) => {
 });
 
 // ------------------------- ME -------------------------
-app.post("/me", async (req, res) => {
+// ========================= ME ENDPOINTS =========================
+
+// helper to strip password safely
+const sanitizeUser = (user) => {
+  const { password, ...safe } = user.toObject();
+  return safe;
+};
+
+// --------- /me/basic ---------
+// returns what /me CURRENTLY returns (safe authenticated user)
+app.post("/me/basic", async (req, res) => {
   const { token, device_id, password } = req.body;
+
+  const auth = await authMiddleware(token, device_id, password);
+  if (auth.error) return res.json(`{ error: auth.error });
+
+  res.json({
+    success: true,
+    user: sanitizeUser(auth.user)
+  });
+});
+
+
+// --------- /me/private ---------
+// returns EVERYTHING in user schema (still authenticated)
+app.post("/me/private", async (req, res) => {
+  const { token, device_id, password } = req.body;
+
   const auth = await authMiddleware(token, device_id, password);
   if (auth.error) return res.json({ error: auth.error });
 
-  const { password: _, ...safe } = auth.user.toObject();
-  res.json({ success: true, user: safe });
+  res.json({
+    success: true,
+    user: auth.user.toObject() // full schema including sensitive fields
+  });
 });
 
-// ------------------------- UPDATE PROFILE -------------------------
-app.post("/update-profile", async (req, res) => {
-  const { token, device_id, user } = req.body;
-  const auth = await authMiddleware(token, device_id);
-  if (auth.error) return res.json({ error: auth.error });
 
-  Object.assign(auth.user, user);
-  await auth.user.save();
+// --------- /me/public ---------
+// requires ONLY username, returns PUBLIC details only
+app.post("/me/public", async (req, res) => {
+  const { username } = req.body;
+  if (!username) return res.json({ error: "Username required" });
 
-  const { password, ...safe } = auth.user.toObject();
-  res.json({ success: true, user: safe });
+  const user = await User.findOne({ username });
+  if (!user) return res.json({ error: "User not found" });
+
+  const u = user.toObject();
+
+  const filterByVisibility = (obj) =>
+    obj && obj.visibility === "public" ? obj : undefined;
+
+  res.json({
+    success: true,
+    user: {
+      id: u.id,
+      username: u.username,
+      account_type: u.account_type,
+      created_at: u.created_at,
+
+      personal: filterByVisibility(u.personal),
+      family: filterByVisibility(u.family),
+
+      education: {
+        schools: u.education?.schools?.filter(s => s.visibility === "public"),
+        certificates: u.education?.certificates?.filter(c => c.visibility === "public")
+      },
+
+      occupations: {
+        self_employed: u.occupations?.self_employed?.filter(o => o.visibility === "public"),
+        job_seeker: u.occupations?.job_seeker?.filter(o => o.visibility === "public"),
+        employed: u.occupations?.employed?.filter(o => o.visibility === "public")
+      },
+
+      properties: u.properties?.filter(p => p.visibility === "public"),
+      media: u.media?.filter(m => m.visibility === "public")
+    }
+  });
 });
+
+
+// ---------------- UPDATE PROFILE ----------------
+
+const ZONES = ["personal","family","education","occupations","properties","media","merits","demerits","phone","email"];
+const BLOCK = ["password","token","token_expiry","login_attempts","account_type","id","_id","device_id","created_at"];
+const ok = p => !BLOCK.some(b => p==b||p.startsWith(b+".")) && ZONES.some(z => p==z||p.startsWith(z+"."));
+
+app.post("/update-profile", async (req,res)=>{
+  const { token, device_id, update } = req.body;
+  const a = await authMiddleware(token, device_id);
+  if (a.error) return res.json({ error: a.error });
+  if (!update || typeof update!=="object") return res.json({ error:"Invalid update" });
+
+  let hit=false;
+  for (const p in update) if (ok(p)) a.user.set(p, update[p]), hit=true;
+  if (!hit) return res.json({ error:"No valid fields" });
+
+  await a.user.save();
+  res.json({ success:true, user:sanitizeUser(a.user) });
+});
+
 
 // ------------------------- SERVER -------------------------
 app.listen(3000, () => console.log("🚀 Backend running on port 3000"));
-
