@@ -375,7 +375,7 @@ app.post("/me/basic", async (req, res) => {
   const { token, device_id, password } = req.body;
 
   const auth = await authMiddleware(token, device_id, password);
-  if (auth.error) return res.json(`{ error: auth.error });
+  if (auth.error) return res.json({ error: auth.error });
 
   res.json({
     success: true,
