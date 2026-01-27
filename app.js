@@ -6,20 +6,41 @@ import cors from "cors";
 import { v4 as uuidv4 } from "uuid";
 import mongoose from "mongoose";
 import nodemailer from "nodemailer";
+import { MeiliSearch } from "meilisearch";
 
 const app = express();
 app.use(cors({
   origin: "*",
-  methods: ["GET", "POST", "OPTIONS"],
+  methods: ["GET", "POST", "OPTIONS", "PUT", "DELETE"],
   allowedHeaders: ["*"]
 }));
-app.use(bodyParser.json());
+app.use(bodyParser.json({ limit: "50mb" }));
+app.use(bodyParser.urlencoded({ extended: true, limit: "50mb" }));
 
 // ------------------------- MongoDB -------------------------
 mongoose
-  .connect(process.env.STORAGE_2, { useNewUrlParser: true, useUnifiedTopology: true })
+  .connect(process.env.STORAGE_2, { 
+    useNewUrlParser: true, 
+    useUnifiedTopology: true,
+    maxPoolSize: 10,
+    serverSelectionTimeoutMS: 5000,
+    socketTimeoutMS: 45000
+  })
   .then(() => console.log("✅ MongoDB Connected"))
   .catch(err => console.error("❌ MongoDB Connection Error:", err));
+
+// ------------------------- Meilisearch Client -------------------------
+let meiliClient;
+try {
+  meiliClient = new MeiliSearch({
+    host: process.env.MEILISEARCH_HOST || "http://localhost:7700",
+    apiKey: process.env.MEILISEARCH_API_KEY || "masterKey"
+  });
+  console.log("✅ Meilisearch Client Initialized");
+} catch (error) {
+  console.error("❌ Meilisearch Connection Error:", error);
+  meiliClient = null;
+}
 
 // ------------------------- COMMON SCHEMAS -------------------------
 const visibility = { type: String, enum: ["public", "private", "selected"], default: "private" };
@@ -33,20 +54,23 @@ const fileSchema = new mongoose.Schema({
 
 // ------------------------- USER SCHEMA -------------------------
 const userSchema = new mongoose.Schema({
-  id: String,
-  username: String,
-  email: String,
+  id: { type: String, unique: true, index: true },
+  username: { type: String, index: true },
+  email: { type: String, unique: true, index: true },
   password: String,
-  account_type: String,
-  phone: String,
-  NIN: String,
-  CAC: String,
+  account_type: { type: String, enum: ["individual", "organization"], index: true },
+  phone: { type: String, index: true },
+  NIN: { type: String, index: true },
+  CAC: { type: String, index: true },
 
   device_id: String,
-  token: String,
+  token: { type: String, index: true },
   token_expiry: Number,
 
-  login_attempts: { count: Number, last_reset: Number },
+  login_attempts: { 
+    count: { type: Number, default: 0 },
+    last_reset: { type: Number, default: Date.now }
+  },
   reset_token: String,
   reset_expiry: Number,
 
@@ -221,10 +245,89 @@ const userSchema = new mongoose.Schema({
     files: [fileSchema]
   }],
 
-  created_at: { type: Number, default: Date.now }
+  created_at: { type: Number, default: Date.now, index: true },
+  updated_at: { type: Number, default: Date.now }
+}, {
+  timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }
 });
 
 const User = mongoose.model("User", userSchema);
+
+// ------------------------- COMPANY SCHEMA -------------------------
+const companySchema = new mongoose.Schema({
+  id: { type: String, unique: true, default: uuidv4, index: true },
+  owner_id: { type: String, index: true },
+  name: { type: String, required: true, index: true },
+  description: String,
+  email: { type: String, index: true },
+  phone: { type: String, index: true },
+  website: String,
+  
+  // Company Details
+  registration_number: { type: String, index: true },
+  tax_id: String,
+  industry: { type: String, index: true },
+  company_type: { type: String, enum: ["llc", "corporation", "partnership", "sole_proprietorship"] },
+  founded_date: String,
+  size: { type: String, enum: ["1-10", "11-50", "51-200", "201-500", "501-1000", "1000+"] },
+  
+  // Location
+  address: String,
+  city: String,
+  state: String,
+  country: String,
+  postal_code: String,
+  
+  // Social Media
+  social_media: {
+    linkedin: String,
+    twitter: String,
+    facebook: String,
+    instagram: String
+  },
+  
+  // Documents
+  documents: [fileSchema],
+  
+  // Products/Services
+  products_services: [{
+    id: { type: String, default: uuidv4 },
+    name: String,
+    description: String,
+    category: String,
+    price_range: String,
+    images: [fileSchema]
+  }],
+  
+  // Team
+  team_members: [{
+    id: { type: String, default: uuidv4 },
+    user_id: String,
+    name: String,
+    position: String,
+    email: String,
+    phone: String,
+    role: { type: String, enum: ["owner", "admin", "manager", "employee"] }
+  }],
+  
+  // Financial Information
+  annual_revenue: String,
+  funding_status: String,
+  investors: [String],
+  
+  // Visibility Settings
+  visibility: visibility,
+  
+  // Status
+  status: { type: String, enum: ["active", "inactive", "pending", "suspended"], default: "active", index: true },
+  
+  created_at: { type: Number, default: Date.now, index: true },
+  updated_at: { type: Number, default: Date.now }
+}, {
+  timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' }
+});
+
+const Company = mongoose.model("Company", companySchema);
 
 // ------------------------- POSTS -------------------------
 const postSchema = new mongoose.Schema({
@@ -252,6 +355,169 @@ const Chat = mongoose.model("Chat", chatSchema);
 const TOKEN_LIFETIME = 7 * 24 * 60 * 60 * 1000;
 const MAX_DAILY_TRIALS = 5;
 const transporter = nodemailer.createTransport({ jsonTransport: true });
+
+// ------------------------- MEILISEARCH HELPERS -------------------------
+const initMeiliSearchIndexes = async () => {
+  if (!meiliClient) {
+    console.warn("⚠️ Meilisearch not available, skipping index initialization");
+    return;
+  }
+
+  try {
+    // Initialize Users Index
+    const usersIndex = meiliClient.index('users');
+    
+    await usersIndex.updateSettings({
+      searchableAttributes: [
+        'username',
+        'email',
+        'phone',
+        'personal.address',
+        'personal.state_of_origin',
+        'personal.nationality',
+        'occupations.self_employed.name',
+        'occupations.employed.company',
+        'account_type'
+      ],
+      filterableAttributes: [
+        'account_type',
+        'personal.state_of_origin',
+        'personal.gender',
+        'created_at'
+      ],
+      sortableAttributes: ['created_at', 'username'],
+      displayedAttributes: [
+        'id',
+        'username',
+        'email',
+        'phone',
+        'account_type',
+        'personal',
+        'occupations',
+        'created_at'
+      ]
+    });
+    
+    console.log("✅ Users index settings updated");
+
+    // Initialize Companies Index
+    const companiesIndex = meiliClient.index('companies');
+    
+    await companiesIndex.updateSettings({
+      searchableAttributes: [
+        'name',
+        'description',
+        'industry',
+        'address',
+        'city',
+        'state',
+        'country',
+        'registration_number',
+        'products_services.name',
+        'team_members.name'
+      ],
+      filterableAttributes: [
+        'industry',
+        'state',
+        'country',
+        'company_type',
+        'size',
+        'status',
+        'created_at'
+      ],
+      sortableAttributes: ['created_at', 'name'],
+      displayedAttributes: [
+        'id',
+        'name',
+        'description',
+        'email',
+        'phone',
+        'address',
+        'city',
+        'state',
+        'country',
+        'industry',
+        'company_type',
+        'size',
+        'status',
+        'website',
+        'social_media',
+        'products_services',
+        'created_at'
+      ]
+    });
+    
+    console.log("✅ Companies index settings updated");
+
+    // Sync existing users to Meilisearch
+    const users = await User.find({}).limit(1000).lean();
+    if (users.length > 0) {
+      const formattedUsers = users.map(user => ({
+        ...user,
+        _id: undefined,
+        password: undefined,
+        token: undefined,
+        reset_token: undefined
+      }));
+      await usersIndex.addDocuments(formattedUsers);
+      console.log(`✅ Synced ${users.length} users to Meilisearch`);
+    }
+
+    // Sync existing companies to Meilisearch
+    const companies = await Company.find({}).limit(1000).lean();
+    if (companies.length > 0) {
+      await companiesIndex.addDocuments(companies);
+      console.log(`✅ Synced ${companies.length} companies to Meilisearch`);
+    }
+
+  } catch (error) {
+    console.error("❌ Error initializing Meilisearch indexes:", error);
+  }
+};
+
+const updateUserInSearchIndex = async (user) => {
+  if (!meiliClient) return;
+  
+  try {
+    const usersIndex = meiliClient.index('users');
+    const userData = {
+      id: user.id,
+      username: user.username,
+      email: user.email,
+      phone: user.phone,
+      account_type: user.account_type,
+      personal: user.personal,
+      occupations: user.occupations,
+      created_at: user.created_at
+    };
+    
+    await usersIndex.addDocuments([userData]);
+  } catch (error) {
+    console.error("❌ Error updating user in search index:", error);
+  }
+};
+
+const updateCompanyInSearchIndex = async (company) => {
+  if (!meiliClient) return;
+  
+  try {
+    const companiesIndex = meiliClient.index('companies');
+    await companiesIndex.addDocuments([company.toObject()]);
+  } catch (error) {
+    console.error("❌ Error updating company in search index:", error);
+  }
+};
+
+const deleteFromSearchIndex = async (indexName, documentId) => {
+  if (!meiliClient) return;
+  
+  try {
+    const index = meiliClient.index(indexName);
+    await index.deleteDocument(documentId);
+  } catch (error) {
+    console.error(`❌ Error deleting from ${indexName} index:`, error);
+  }
+};
 
 // ------------------------- HELPERS -------------------------
 const createNewToken = (user_id) =>
@@ -318,12 +584,15 @@ app.post("/signup", async (req, res) => {
       login_attempts: { count: 0, last_reset: Date.now() }
     }).save();
 
+    // Add to search index
+    await updateUserInSearchIndex(user);
+
     logApiCall(endpoint, req.body, id, true, "Signup");
     res.json({ message: "Signup successful", token: user.token });
 
   } catch (e) {
-    logApiCall(endpoint, req.body, null, false, "Error");
-    res.json({ error: "Signup failed" });
+    logApiCall(endpoint, req.body, null, false, "Error: " + e.message);
+    res.json({ error: "Signup failed: " + e.message });
   }
 });
 
@@ -348,29 +617,439 @@ app.post("/login", async (req, res) => {
   res.json({ message: "Login successful", token: user.token });
 });
 
-// ------------------------- SEARCH USERS -------------------------
-app.post("/search-users", async (req, res) => {
-  const { token, device_id, username } = req.body;
-  const auth = await authMiddleware(token, device_id);
-  if (auth.error) return res.json({ error: auth.error });
+// ------------------------- SEARCH ENDPOINTS -------------------------
+// Search Users with Meilisearch
+app.post("/search/users", async (req, res) => {
+  try {
+    const { 
+      query = "", 
+      filters = {}, 
+      limit = 20, 
+      offset = 0,
+      sort_by = "created_at:desc"
+    } = req.body;
 
-  const users = await User.find({ username: new RegExp(username, "i") })
-    .select("id username email phone account_type personal");
+    const { token, device_id } = req.body;
+    
+    // Optional authentication - remove if you want public search
+    if (token && device_id) {
+      const auth = await authMiddleware(token, device_id);
+      if (auth.error) return res.json({ error: auth.error });
+    }
 
-  res.json({ results: users });
+    if (!meiliClient) {
+      // Fallback to MongoDB search if Meilisearch is not available
+      const searchConditions = [];
+      
+      if (query) {
+        searchConditions.push(
+          { username: new RegExp(query, "i") },
+          { email: new RegExp(query, "i") },
+          { phone: new RegExp(query, "i") },
+          { "personal.address": new RegExp(query, "i") },
+          { "personal.state_of_origin": new RegExp(query, "i") },
+          { "occupations.self_employed.name": new RegExp(query, "i") },
+          { "occupations.employed.company": new RegExp(query, "i") }
+        );
+      }
+
+      const mongoQuery = searchConditions.length > 0 ? { $or: searchConditions } : {};
+      
+      // Apply filters
+      if (filters.account_type) mongoQuery.account_type = filters.account_type;
+      if (filters.state) mongoQuery["personal.state_of_origin"] = filters.state;
+      if (filters.gender) mongoQuery["personal.gender"] = filters.gender;
+
+      const users = await User.find(mongoQuery)
+        .select("id username email phone account_type personal.family personal.address personal.state_of_origin occupations created_at")
+        .skip(offset)
+        .limit(limit)
+        .sort({ created_at: -1 })
+        .lean();
+
+      const total = await User.countDocuments(mongoQuery);
+
+      return res.json({
+        success: true,
+        results: users,
+        pagination: {
+          total,
+          limit,
+          offset,
+          has_more: offset + users.length < total
+        },
+        source: "mongodb_fallback"
+      });
+    }
+
+    // Use Meilisearch for search
+    const usersIndex = meiliClient.index('users');
+    
+    const searchParams = {
+      limit,
+      offset,
+      sort: [sort_by]
+    };
+
+    // Add filters if provided
+    const filterConditions = [];
+    if (filters.account_type) filterConditions.push(`account_type = "${filters.account_type}"`);
+    if (filters.state) filterConditions.push(`personal.state_of_origin = "${filters.state}"`);
+    if (filters.gender) filterConditions.push(`personal.gender = "${filters.gender}"`);
+    
+    if (filterConditions.length > 0) {
+      searchParams.filter = filterConditions;
+    }
+
+    const searchResults = await usersIndex.search(query, searchParams);
+
+    res.json({
+      success: true,
+      results: searchResults.hits,
+      pagination: {
+        total: searchResults.estimatedTotalHits,
+        limit,
+        offset,
+        has_more: offset + searchResults.hits.length < searchResults.estimatedTotalHits
+      },
+      processing_time_ms: searchResults.processingTimeMs,
+      source: "meilisearch"
+    });
+
+  } catch (error) {
+    console.error("❌ Search users error:", error);
+    res.status(500).json({ error: "Search failed", details: error.message });
+  }
 });
 
-// ------------------------- ME -------------------------
-// ========================= ME ENDPOINTS =========================
+// Search Companies with Meilisearch
+app.post("/search/companies", async (req, res) => {
+  try {
+    const { 
+      query = "", 
+      filters = {}, 
+      limit = 20, 
+      offset = 0,
+      sort_by = "created_at:desc"
+    } = req.body;
 
-// helper to strip password safely
+    const { token, device_id } = req.body;
+    
+    // Optional authentication
+    if (token && device_id) {
+      const auth = await authMiddleware(token, device_id);
+      if (auth.error) return res.json({ error: auth.error });
+    }
+
+    if (!meiliClient) {
+      // Fallback to MongoDB search
+      const searchConditions = [];
+      
+      if (query) {
+        searchConditions.push(
+          { name: new RegExp(query, "i") },
+          { description: new RegExp(query, "i") },
+          { industry: new RegExp(query, "i") },
+          { address: new RegExp(query, "i") },
+          { city: new RegExp(query, "i") },
+          { state: new RegExp(query, "i") },
+          { "products_services.name": new RegExp(query, "i") }
+        );
+      }
+
+      const mongoQuery = searchConditions.length > 0 ? { $or: searchConditions } : {};
+      
+      // Apply filters
+      if (filters.industry) mongoQuery.industry = filters.industry;
+      if (filters.state) mongoQuery.state = filters.state;
+      if (filters.country) mongoQuery.country = filters.country;
+      if (filters.company_type) mongoQuery.company_type = filters.company_type;
+      if (filters.size) mongoQuery.size = filters.size;
+      if (filters.status) mongoQuery.status = filters.status;
+
+      const companies = await Company.find(mongoQuery)
+        .select("id name description email phone address city state country industry company_type size status website social_media products_services created_at")
+        .skip(offset)
+        .limit(limit)
+        .sort({ created_at: -1 })
+        .lean();
+
+      const total = await Company.countDocuments(mongoQuery);
+
+      return res.json({
+        success: true,
+        results: companies,
+        pagination: {
+          total,
+          limit,
+          offset,
+          has_more: offset + companies.length < total
+        },
+        source: "mongodb_fallback"
+      });
+    }
+
+    // Use Meilisearch for search
+    const companiesIndex = meiliClient.index('companies');
+    
+    const searchParams = {
+      limit,
+      offset,
+      sort: [sort_by]
+    };
+
+    // Add filters if provided
+    const filterConditions = [];
+    if (filters.industry) filterConditions.push(`industry = "${filters.industry}"`);
+    if (filters.state) filterConditions.push(`state = "${filters.state}"`);
+    if (filters.country) filterConditions.push(`country = "${filters.country}"`);
+    if (filters.company_type) filterConditions.push(`company_type = "${filters.company_type}"`);
+    if (filters.size) filterConditions.push(`size = "${filters.size}"`);
+    if (filters.status) filterConditions.push(`status = "${filters.status}"`);
+    
+    if (filterConditions.length > 0) {
+      searchParams.filter = filterConditions;
+    }
+
+    const searchResults = await companiesIndex.search(query, searchParams);
+
+    res.json({
+      success: true,
+      results: searchResults.hits,
+      pagination: {
+        total: searchResults.estimatedTotalHits,
+        limit,
+        offset,
+        has_more: offset + searchResults.hits.length < searchResults.estimatedTotalHits
+      },
+      processing_time_ms: searchResults.processingTimeMs,
+      source: "meilisearch"
+    });
+
+  } catch (error) {
+    console.error("❌ Search companies error:", error);
+    res.status(500).json({ error: "Search failed", details: error.message });
+  }
+});
+
+// Combined search (both users and companies)
+app.post("/search/all", async (req, res) => {
+  try {
+    const { query = "", limit = 10 } = req.body;
+
+    const { token, device_id } = req.body;
+    
+    // Optional authentication
+    if (token && device_id) {
+      const auth = await authMiddleware(token, device_id);
+      if (auth.error) return res.json({ error: auth.error });
+    }
+
+    const [usersResults, companiesResults] = await Promise.all([
+      User.find({
+        $or: [
+          { username: new RegExp(query, "i") },
+          { email: new RegExp(query, "i") },
+          { "personal.address": new RegExp(query, "i") },
+          { "personal.state_of_origin": new RegExp(query, "i") }
+        ]
+      })
+      .select("id username email account_type personal.address personal.state_of_origin")
+      .limit(limit)
+      .lean(),
+      
+      Company.find({
+        $or: [
+          { name: new RegExp(query, "i") },
+          { description: new RegExp(query, "i") },
+          { industry: new RegExp(query, "i") },
+          { address: new RegExp(query, "i") },
+          { state: new RegExp(query, "i") }
+        ]
+      })
+      .select("id name description industry address state country")
+      .limit(limit)
+      .lean()
+    ]);
+
+    res.json({
+      success: true,
+      users: usersResults,
+      companies: companiesResults,
+      total: usersResults.length + companiesResults.length
+    });
+
+  } catch (error) {
+    console.error("❌ Combined search error:", error);
+    res.status(500).json({ error: "Search failed", details: error.message });
+  }
+});
+
+// ------------------------- COMPANY ENDPOINTS -------------------------
+// Create Company
+app.post("/companies/create", async (req, res) => {
+  try {
+    const { token, device_id, ...companyData } = req.body;
+
+    const auth = await authMiddleware(token, device_id);
+    if (auth.error) return res.json({ error: auth.error });
+
+    // Check if user is organization type
+    if (auth.user.account_type !== "organization") {
+      return res.json({ error: "Only organization accounts can create companies" });
+    }
+
+    const company = await new Company({
+      ...companyData,
+      owner_id: auth.user.id,
+      id: uuidv4()
+    }).save();
+
+    // Add to search index
+    await updateCompanyInSearchIndex(company);
+
+    res.json({
+      success: true,
+      message: "Company created successfully",
+      company
+    });
+
+  } catch (error) {
+    console.error("❌ Create company error:", error);
+    res.status(500).json({ error: "Failed to create company", details: error.message });
+  }
+});
+
+// Update Company
+app.put("/companies/:id", async (req, res) => {
+  try {
+    const { token, device_id, ...updateData } = req.body;
+    const companyId = req.params.id;
+
+    const auth = await authMiddleware(token, device_id);
+    if (auth.error) return res.json({ error: auth.error });
+
+    const company = await Company.findOne({ id: companyId });
+    if (!company) return res.json({ error: "Company not found" });
+
+    // Check ownership
+    if (company.owner_id !== auth.user.id) {
+      return res.json({ error: "You don't have permission to update this company" });
+    }
+
+    Object.assign(company, updateData, { updated_at: Date.now() });
+    await company.save();
+
+    // Update search index
+    await updateCompanyInSearchIndex(company);
+
+    res.json({
+      success: true,
+      message: "Company updated successfully",
+      company
+    });
+
+  } catch (error) {
+    console.error("❌ Update company error:", error);
+    res.status(500).json({ error: "Failed to update company", details: error.message });
+  }
+});
+
+// Get Company by ID
+app.post("/companies/:id", async (req, res) => {
+  try {
+    const { token, device_id } = req.body;
+    const companyId = req.params.id;
+
+    const auth = await authMiddleware(token, device_id);
+    if (auth.error) return res.json({ error: auth.error });
+
+    const company = await Company.findOne({ id: companyId });
+    if (!company) return res.json({ error: "Company not found" });
+
+    res.json({
+      success: true,
+      company
+    });
+
+  } catch (error) {
+    console.error("❌ Get company error:", error);
+    res.status(500).json({ error: "Failed to get company", details: error.message });
+  }
+});
+
+// List User's Companies
+app.post("/companies/my", async (req, res) => {
+  try {
+    const { token, device_id, limit = 20, offset = 0 } = req.body;
+
+    const auth = await authMiddleware(token, device_id);
+    if (auth.error) return res.json({ error: auth.error });
+
+    const companies = await Company.find({ owner_id: auth.user.id })
+      .skip(offset)
+      .limit(limit)
+      .sort({ created_at: -1 })
+      .lean();
+
+    const total = await Company.countDocuments({ owner_id: auth.user.id });
+
+    res.json({
+      success: true,
+      companies,
+      pagination: {
+        total,
+        limit,
+        offset,
+        has_more: offset + companies.length < total
+      }
+    });
+
+  } catch (error) {
+    console.error("❌ List companies error:", error);
+    res.status(500).json({ error: "Failed to list companies", details: error.message });
+  }
+});
+
+// Delete Company
+app.delete("/companies/:id", async (req, res) => {
+  try {
+    const { token, device_id } = req.body;
+    const companyId = req.params.id;
+
+    const auth = await authMiddleware(token, device_id);
+    if (auth.error) return res.json({ error: auth.error });
+
+    const company = await Company.findOne({ id: companyId });
+    if (!company) return res.json({ error: "Company not found" });
+
+    // Check ownership
+    if (company.owner_id !== auth.user.id) {
+      return res.json({ error: "You don't have permission to delete this company" });
+    }
+
+    await company.deleteOne();
+    
+    // Remove from search index
+    await deleteFromSearchIndex('companies', companyId);
+
+    res.json({
+      success: true,
+      message: "Company deleted successfully"
+    });
+
+  } catch (error) {
+    console.error("❌ Delete company error:", error);
+    res.status(500).json({ error: "Failed to delete company", details: error.message });
+  }
+});
+
+// ------------------------- ME ENDPOINTS -------------------------
 const sanitizeUser = (user) => {
   const { password, ...safe } = user.toObject();
   return safe;
 };
 
-// --------- /me/basic ---------
-// returns what /me CURRENTLY returns (safe authenticated user)
 app.post("/me/basic", async (req, res) => {
   const { token, device_id, password } = req.body;
 
@@ -383,9 +1062,6 @@ app.post("/me/basic", async (req, res) => {
   });
 });
 
-
-// --------- /me/private ---------
-// returns EVERYTHING in user schema (still authenticated)
 app.post("/me/private", async (req, res) => {
   const { token, device_id, password } = req.body;
 
@@ -394,13 +1070,10 @@ app.post("/me/private", async (req, res) => {
 
   res.json({
     success: true,
-    user: auth.user.toObject() // full schema including sensitive fields
+    user: auth.user.toObject()
   });
 });
 
-
-// --------- /me/public ---------
-// requires ONLY username, returns PUBLIC details only
 app.post("/me/public", async (req, res) => {
   const { username } = req.body;
   if (!username) return res.json({ error: "Username required" });
@@ -441,27 +1114,123 @@ app.post("/me/public", async (req, res) => {
   });
 });
 
-
 // ---------------- UPDATE PROFILE ----------------
-
 const ZONES = ["personal","family","education","occupations","properties","media","merits","demerits","phone","email"];
 const BLOCK = ["password","token","token_expiry","login_attempts","account_type","id","_id","device_id","created_at"];
 const ok = p => !BLOCK.some(b => p==b||p.startsWith(b+".")) && ZONES.some(z => p==z||p.startsWith(z+"."));
 
-app.post("/update-profile", async (req,res)=>{
+app.post("/update-profile", async (req, res) => {
   const { token, device_id, update } = req.body;
-  const a = await authMiddleware(token, device_id);
-  if (a.error) return res.json({ error: a.error });
-  if (!update || typeof update!=="object") return res.json({ error:"Invalid update" });
+  const auth = await authMiddleware(token, device_id);
+  if (auth.error) return res.json({ error: auth.error });
+  if (!update || typeof update !== "object") return res.json({ error: "Invalid update" });
 
-  let hit=false;
-  for (const p in update) if (ok(p)) a.user.set(p, update[p]), hit=true;
-  if (!hit) return res.json({ error:"No valid fields" });
+  let hit = false;
+  for (const p in update) {
+    if (ok(p)) {
+      auth.user.set(p, update[p]);
+      hit = true;
+    }
+  }
+  if (!hit) return res.json({ error: "No valid fields" });
 
-  await a.user.save();
-  res.json({ success:true, user:sanitizeUser(a.user) });
+  auth.user.updated_at = Date.now();
+  await auth.user.save();
+
+  // Update search index
+  await updateUserInSearchIndex(auth.user);
+
+  res.json({ success: true, user: sanitizeUser(auth.user) });
 });
 
+// ------------------------- SYNC ENDPOINTS -------------------------
+// Manual sync for Meilisearch (admin endpoint)
+app.post("/sync/search-index", async (req, res) => {
+  try {
+    const { token, device_id, type = "all" } = req.body;
+
+    const auth = await authMiddleware(token, device_id);
+    if (auth.error) return res.json({ error: auth.error });
+
+    // Simple admin check (you might want to implement proper admin authentication)
+    if (auth.user.account_type !== "organization") {
+      return res.json({ error: "Only organization accounts can sync search index" });
+    }
+
+    let results = {};
+
+    if (type === "users" || type === "all") {
+      const users = await User.find({}).limit(5000).lean();
+      if (meiliClient && users.length > 0) {
+        const formattedUsers = users.map(user => ({
+          id: user.id,
+          username: user.username,
+          email: user.email,
+          phone: user.phone,
+          account_type: user.account_type,
+          personal: user.personal,
+          occupations: user.occupations,
+          created_at: user.created_at
+        }));
+        
+        await meiliClient.index('users').addDocuments(formattedUsers);
+        results.users = { synced: users.length };
+      }
+    }
+
+    if (type === "companies" || type === "all") {
+      const companies = await Company.find({}).limit(5000).lean();
+      if (meiliClient && companies.length > 0) {
+        await meiliClient.index('companies').addDocuments(companies);
+        results.companies = { synced: companies.length };
+      }
+    }
+
+    res.json({
+      success: true,
+      message: "Search index sync completed",
+      results
+    });
+
+  } catch (error) {
+    console.error("❌ Sync search index error:", error);
+    res.status(500).json({ error: "Sync failed", details: error.message });
+  }
+});
+
+// Health check endpoint
+app.get("/health", (req, res) => {
+  const health = {
+    status: "healthy",
+    timestamp: new Date().toISOString(),
+    services: {
+      mongodb: mongoose.connection.readyState === 1 ? "connected" : "disconnected",
+      meilisearch: meiliClient ? "connected" : "disconnected",
+      server: "running"
+    }
+  };
+  res.json(health);
+});
 
 // ------------------------- SERVER -------------------------
-app.listen(3000, () => console.log("🚀 Backend running on port 3000"));
+const PORT = process.env.PORT || 3000;
+const server = app.listen(PORT, async () => {
+  console.log(`🚀 Backend running on port ${PORT}`);
+  
+  // Initialize Meilisearch indexes after server starts
+  setTimeout(() => {
+    initMeiliSearchIndexes();
+  }, 3000); // Wait 3 seconds for server to fully start
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('SIGTERM signal received: closing HTTP server');
+  server.close(() => {
+    console.log('HTTP server closed');
+    mongoose.connection.close(false, () => {
+      console.log('MongoDB connection closed');
+      process.exit(0);
+    });
+  });
+});
