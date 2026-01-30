@@ -351,37 +351,41 @@ app.post("/login", async (req, res) => {
 // ------------------------- SEARCH USERS -------------------------
 app.post("/search-users", async (req,res)=>{
   try{
-    const {token,device_id,filters={}}=req.body,
-          auth=await authMiddleware(token,device_id);
-    if(auth.error) return res.status(401).json({error:auth.error});
+    const {token,device_id,filters={}}=req.body;
+    if(!token||!device_id) return res.status(400).json({error:"Missing token or device_id"});
 
-    const and=[];
+    const a=await authMiddleware(token,device_id);
+    if(a.error) return res.status(401).json({error:a.error});
 
-    if(filters.username){
-      const u=String(filters.username).trim();
-      if(u.length<3) return res.json({error:"Username search too short"});
-      and.push({username:{$regex:`^${escapeRegex(u)}`,$options:"i"}});
+    const esc=s=>String(s||"").replace(/[.*+?^${}()|[\]\\]/g,"\\$&"),
+          and=[];
+
+    if(filters.username?.trim()){
+      const u=filters.username.trim();
+      if(u.length<3) return res.status(400).json({error:"Username must be ≥ 3 chars"});
+      and.push({username:{$regex:`^${esc(u)}`,$options:"i"}});
     }
 
     ["state_of_origin","lga","nationality","gender","religion","marital_status"]
-      .forEach(f=>filters[f]&&and.push({[`personal.${f}`]:String(filters[f]).trim()}));
+      .forEach(f=>filters[f]?.trim()&&and.push({[`personal.${f}`]:filters[f].trim()}));
 
-    and.push({$or:[{"personal.visibility":"public"},{_id:auth.user._id}]});
+    and.push({$or:[{"personal.visibility":"public"},{_id:a.user._id}]});
 
     const users=await User.find(and.length?{$and:and}:{})
       .limit(25).lean()
       .select({_id:1,id:1,username:1,account_type:1,created_at:1,
-        "personal.gender":1,"personal.state_of_origin":1,"personal.lga":1,
-        "personal.nationality":1,"personal.visibility":1});
+        "personal.gender":1,"personal.state_of_origin":1,
+        "personal.lga":1,"personal.nationality":1,"personal.visibility":1});
 
-    res.json({success:true,results:users.map(u=>(
-      u.personal?.visibility!=="public"&&String(u._id)!==String(auth.user._id)&&delete u.personal,u
+    res.json({success:true,count:users.length,results:users.map(u=>(
+      u.personal?.visibility!=="public"&&String(u._id)!==String(a.user._id)&&delete u.personal,u
     ))});
   }catch(e){
     console.error("SEARCH ERROR:",e);
-    res.status(500).json({error:"Search failed"});
+    res.status(500).json({error:"Search failed",details:e.message});
   }
 });
+
 
 
 // ------------------------- ME -------------------------
