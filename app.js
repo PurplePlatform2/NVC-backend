@@ -430,7 +430,7 @@ app.post("/me/public", async (req, res) => {
   res.json({ success: true, user: maskUserPrivateFields(userObj) });
 });
 
-const ZONES = ["personal", "family", "education", "occupations", "properties", "media", "merits", "demerits", "phone", "email"];
+const ZONES = ["username", "personal", "family", "education", "occupations", "properties", "media", "merits", "demerits", "phone", "email"];
 const BLOCK = ["password", "token", "token_expiry", "login_attempts", "account_type", "id", "_id", "device_id", "created_at", "_hidden"];
 const ok = p => !BLOCK.some(b => p == b || p.startsWith(b + ".")) && ZONES.some(z => p == z || p.startsWith(z + "."));
 
