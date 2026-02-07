@@ -355,7 +355,8 @@ app.post("/search-users", async (req, res) => {
     const and = [];
     if (filters.username?.trim()) {
       if (filters.username.trim().length < 3) return res.status(400).json({ error: "Username must be ≥ 3 chars" });
-      and.push({ username: { $regex: `^${esc(filters.username.trim())}`, $options: "i" } });
+     and.push({ username: {  $regex: esc(filters.username.trim()),  $options: "i" }});
+
     }
     
     ["state_of_origin", "lga", "nationality", "gender", "religion", "marital_status"].forEach(f => {
